@@ -1,0 +1,583 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>CodeRAG</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;600&family=Syne:wght@400;700;800&display=swap" rel="stylesheet">
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --bg: #0a0a0f;
+      --surface: #111118;
+      --border: #1e1e2e;
+      --accent: #7fff6e;
+      --accent-dim: #3a6635;
+      --text: #e8e8f0;
+      --muted: #555568;
+      --error: #ff6b6b;
+      --mono: 'IBM Plex Mono', monospace;
+      --sans: 'Syne', sans-serif;
+    }
+
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      background: var(--bg);
+      color: var(--text);
+      font-family: var(--sans);
+      min-height: 100vh;
+      display: grid;
+      grid-template-columns: 300px 1fr;
+      grid-template-rows: auto 1fr;
+    }
+
+    header {
+      grid-column: 1 / -1;
+      padding: 20px 32px;
+      border-bottom: 1px solid var(--border);
+      display: flex;
+      align-items: center;
+      gap: 16px;
+    }
+
+    .logo { font-size: 22px; font-weight: 800; letter-spacing: -0.5px; }
+    .logo span { color: var(--accent); }
+    .tagline { font-family: var(--mono); font-size: 11px; color: var(--muted); margin-left: auto; }
+
+    aside {
+      border-right: 1px solid var(--border);
+      padding: 24px 20px;
+      display: flex;
+      flex-direction: column;
+      gap: 28px;
+    }
+
+    .section-label {
+      font-family: var(--mono);
+      font-size: 10px;
+      color: var(--muted);
+      letter-spacing: 2px;
+      text-transform: uppercase;
+      margin-bottom: 10px;
+    }
+
+    .url-input {
+      width: 100%;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 10px 12px;
+      color: var(--text);
+      font-family: var(--mono);
+      font-size: 12px;
+      outline: none;
+      transition: border-color 0.2s;
+    }
+
+    .url-input:focus { border-color: var(--accent-dim); }
+    .url-input::placeholder { color: var(--muted); }
+
+    .btn {
+      width: 100%;
+      margin-top: 10px;
+      padding: 10px;
+      background: var(--accent);
+      color: #0a0a0f;
+      border: none;
+      border-radius: 6px;
+      font-family: var(--sans);
+      font-weight: 700;
+      font-size: 13px;
+      cursor: pointer;
+      transition: opacity 0.2s;
+    }
+
+    .btn:hover { opacity: 0.85; }
+    .btn:disabled { opacity: 0.4; cursor: not-allowed; }
+
+    .btn-outline {
+      background: transparent;
+      border: 1px solid var(--border);
+      color: var(--text);
+      margin-top: 0;
+    }
+
+    .btn-outline:hover { border-color: var(--accent-dim); }
+
+    #repo-list { display: flex; flex-direction: column; gap: 6px; }
+
+    .repo-tag {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 8px 10px;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      font-family: var(--mono);
+      font-size: 12px;
+      cursor: pointer;
+      transition: border-color 0.2s;
+    }
+
+    .repo-tag:hover, .repo-tag.active { border-color: var(--accent); color: var(--accent); }
+
+    .repo-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--accent); flex-shrink: 0; }
+
+    .ingest-status { font-family: var(--mono); font-size: 11px; margin-top: 8px; min-height: 16px; }
+    .status-ok { color: var(--accent); }
+    .status-err { color: var(--error); }
+    .status-loading { color: var(--muted); }
+
+    main { display: flex; flex-direction: column; overflow: hidden; }
+
+    .scope-bar {
+      padding: 12px 24px;
+      border-bottom: 1px solid var(--border);
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      font-family: var(--mono);
+      font-size: 12px;
+      color: var(--muted);
+    }
+
+    #scope-select {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      color: var(--text);
+      font-family: var(--mono);
+      font-size: 12px;
+      padding: 4px 8px;
+      outline: none;
+    }
+
+    #messages {
+      flex: 1;
+      overflow-y: auto;
+      padding: 24px;
+      display: flex;
+      flex-direction: column;
+      gap: 20px;
+    }
+
+    #messages::-webkit-scrollbar { width: 4px; }
+    #messages::-webkit-scrollbar-track { background: transparent; }
+    #messages::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
+
+    .msg { display: flex; flex-direction: column; gap: 6px; animation: fadeUp 0.3s ease forwards; }
+
+    @keyframes fadeUp {
+      from { opacity: 0; transform: translateY(8px); }
+      to   { opacity: 1; transform: translateY(0); }
+    }
+
+    .msg-role { font-family: var(--mono); font-size: 10px; letter-spacing: 2px; text-transform: uppercase; color: var(--muted); }
+    .msg.user .msg-role { color: var(--accent-dim); }
+
+    .msg-bubble {
+      padding: 14px 16px;
+      border-radius: 8px;
+      line-height: 1.65;
+      font-size: 14px;
+      max-width: 820px;
+    }
+
+    .msg.user .msg-bubble {
+      background: var(--surface);
+      border: 1px solid var(--border);
+    }
+
+    .msg.assistant .msg-bubble {
+      background: #0f1a0f;
+      border: 1px solid var(--accent-dim);
+      white-space: pre-wrap;
+    }
+
+    .sources { display: flex; flex-direction: column; gap: 6px; margin-top: 6px; max-width: 820px; }
+
+    .source-chip {
+      font-family: var(--mono);
+      font-size: 11px;
+      padding: 8px 10px;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      color: var(--muted);
+      display: flex;
+      flex-direction: column;
+      transition: border-color 0.2s;
+    }
+
+    .source-chip:hover { border-color: var(--accent-dim); }
+
+    .chip-header {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      width: 100%;
+      cursor: pointer;
+    }
+
+    .chip-toggle { margin-left: auto; font-size: 9px; color: var(--muted); user-select: none; }
+
+    .chip-code {
+      display: none;
+      margin-top: 10px;
+      padding: 10px;
+      background: var(--bg);
+      border-radius: 4px;
+      font-family: var(--mono);
+      font-size: 11px;
+      white-space: pre;
+      overflow-x: auto;
+      color: var(--text);
+      border-top: 1px solid var(--border);
+      line-height: 1.6;
+    }
+
+    .chip-code.open { display: block; }
+
+    .thinking {
+      display: flex;
+      gap: 5px;
+      padding: 14px 16px;
+      background: #0f1a0f;
+      border: 1px solid var(--accent-dim);
+      border-radius: 8px;
+      width: fit-content;
+    }
+
+    .dot { width: 6px; height: 6px; border-radius: 50%; background: var(--accent); animation: bounce 1.2s infinite; }
+    .dot:nth-child(2) { animation-delay: 0.2s; }
+    .dot:nth-child(3) { animation-delay: 0.4s; }
+
+    @keyframes bounce {
+      0%, 80%, 100% { transform: translateY(0); opacity: 0.4; }
+      40% { transform: translateY(-6px); opacity: 1; }
+    }
+
+    .input-bar { padding: 16px 24px; border-top: 1px solid var(--border); display: flex; gap: 10px; }
+
+    #question-input {
+      flex: 1;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 12px 16px;
+      color: var(--text);
+      font-family: var(--sans);
+      font-size: 14px;
+      outline: none;
+      transition: border-color 0.2s;
+      resize: none;
+      height: 48px;
+    }
+
+    #question-input:focus { border-color: var(--accent-dim); }
+    #question-input::placeholder { color: var(--muted); }
+
+    #send-btn {
+      width: 48px; height: 48px;
+      background: var(--accent);
+      border: none;
+      border-radius: 8px;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      flex-shrink: 0;
+      transition: opacity 0.2s;
+    }
+
+    #send-btn:hover { opacity: 0.85; }
+    #send-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+
+    .empty-state { margin: auto; text-align: center; color: var(--muted); font-family: var(--mono); font-size: 13px; line-height: 2; }
+    .empty-state .big { font-size: 32px; margin-bottom: 12px; }
+  </style>
+</head>
+<body>
+
+<header>
+  <div class="logo">Code<span>RAG</span></div>
+  <div class="tagline">// ask your codebase anything</div>
+</header>
+
+<aside>
+  <div>
+    <div class="section-label">Index a Repo</div>
+    <input id="github-url" class="url-input" type="text" placeholder="https://github.com/owner/repo" />
+    <button class="btn" id="ingest-btn" onclick="ingestRepo()">Index Repo</button>
+    <div id="ingest-status" class="ingest-status"></div>
+  </div>
+
+  <div>
+    <div class="section-label">Indexed Repos</div>
+    <div id="repo-list">
+      <div style="font-family:var(--mono);font-size:12px;color:var(--muted)">Loading...</div>
+    </div>
+    <button class="btn btn-outline" style="margin-top:10px" onclick="loadRepos()">↻ Refresh</button>
+  </div>
+</aside>
+
+<main>
+  <div class="scope-bar">
+    Search:
+    <select id="scope-select">
+      <option value="all">all repos</option>
+    </select>
+  </div>
+
+  <div id="messages">
+    <div class="empty-state">
+      <div class="big">⌥</div>
+      Index a repo on the left,<br>then ask anything about the codebase.
+    </div>
+  </div>
+
+  <div class="input-bar">
+    <textarea id="question-input" placeholder="How does authentication work?" onkeydown="handleKey(event)"></textarea>
+    <button id="send-btn" onclick="sendQuery()">
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#0a0a0f" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+        <line x1="22" y1="2" x2="11" y2="13"></line>
+        <polygon points="22 2 15 22 11 13 2 9 22 2"></polygon>
+      </svg>
+    </button>
+  </div>
+</main>
+
+<script>
+  async function loadRepos() {
+    const res = await fetch('/repos');
+    const data = await res.json();
+    const list = document.getElementById('repo-list');
+    const select = document.getElementById('scope-select');
+
+    list.innerHTML = '';
+    select.innerHTML = '<option value="all">all repos</option>';
+
+    if (!data.repos.length) {
+      list.innerHTML = '<div style="font-family:var(--mono);font-size:12px;color:var(--muted)">No repos yet</div>';
+      return;
+    }
+
+    data.repos.forEach(repo => {
+      const tag = document.createElement('div');
+      tag.className = 'repo-tag';
+      tag.innerHTML = `<div class="repo-dot"></div>${repo}`;
+      tag.onclick = () => {
+        document.getElementById('scope-select').value = repo;
+        document.querySelectorAll('.repo-tag').forEach(t => t.classList.remove('active'));
+        tag.classList.add('active');
+      };
+      list.appendChild(tag);
+
+      const opt = document.createElement('option');
+      opt.value = repo;
+      opt.textContent = repo;
+      select.appendChild(opt);
+    });
+  }
+
+  async function ingestRepo() {
+    const url = document.getElementById('github-url').value.trim();
+    const status = document.getElementById('ingest-status');
+    const btn = document.getElementById('ingest-btn');
+
+    if (!url) { status.textContent = 'Enter a GitHub URL.'; status.className = 'ingest-status status-err'; return; }
+
+    btn.disabled = true;
+    status.textContent = 'Indexing... this may take a minute';
+    status.className = 'ingest-status status-loading';
+
+    try {
+      const res = await fetch('/ingest', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ github_url: url })
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.detail);
+      status.textContent = `✓ '${data.repo}' indexed`;
+      status.className = 'ingest-status status-ok';
+      document.getElementById('github-url').value = '';
+      loadRepos();
+    } catch(e) {
+      status.textContent = `✗ ${e.message}`;
+      status.className = 'ingest-status status-err';
+    } finally {
+      btn.disabled = false;
+    }
+  }
+
+  function handleKey(e) {
+    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendQuery(); }
+  }
+
+  function addMessage(role, content, sources=[]) {
+    const messages = document.getElementById('messages');
+    const empty = messages.querySelector('.empty-state');
+    if (empty) empty.remove();
+
+    const msg = document.createElement('div');
+    msg.className = `msg ${role}`;
+
+    const roleLabel = document.createElement('div');
+    roleLabel.className = 'msg-role';
+    roleLabel.textContent = role === 'user' ? 'you' : 'coderag';
+    msg.appendChild(roleLabel);
+
+    const bubble = document.createElement('div');
+    bubble.className = 'msg-bubble';
+    bubble.textContent = content;
+    msg.appendChild(bubble);
+
+    if (sources.length) {
+      const sourcesDiv = document.createElement('div');
+      sourcesDiv.className = 'sources';
+      sources.forEach(s => {
+        const chip = document.createElement('div');
+        chip.className = 'source-chip';
+        chip.innerHTML = `<strong>${s.function}</strong> · ${s.file}:${s.line} · ${s.score}`;
+        sourcesDiv.appendChild(chip);
+      });
+      msg.appendChild(sourcesDiv);
+    }
+
+    messages.appendChild(msg);
+    messages.scrollTop = messages.scrollHeight;
+    return msg;
+  }
+
+  function addThinking() {
+    const messages = document.getElementById('messages');
+    const empty = messages.querySelector('.empty-state');
+    if (empty) empty.remove();
+
+    const msg = document.createElement('div');
+    msg.className = 'msg assistant';
+    msg.innerHTML = `<div class="msg-role">coderag</div><div class="thinking"><div class="dot"></div><div class="dot"></div><div class="dot"></div></div>`;
+    messages.appendChild(msg);
+    messages.scrollTop = messages.scrollHeight;
+    return msg;
+  }
+
+  // Chat history for conversation memory (max 10 turns)
+  let chatHistory = [];
+
+  function addToHistory(question, answer) {
+    chatHistory.push({ role: "user", content: question });
+    chatHistory.push({ role: "assistant", content: answer });
+    if (chatHistory.length > 20) chatHistory = chatHistory.slice(-20);
+  }
+
+  function buildSourceChip(s) {
+    const chip = document.createElement('div');
+    chip.className = 'source-chip';
+    const safeCode = (s.code || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    chip.innerHTML =
+      '<div class="chip-header">' +
+        '<strong style="color:var(--accent)">' + s.function + '</strong>' +
+        '<span style="color:var(--muted)"> · ' + s.file + ':' + s.line + ' · ' + s.score + '</span>' +
+        '<span class="chip-toggle">▼ show code</span>' +
+      '</div>' +
+      '<pre class="chip-code">' + safeCode + '</pre>';
+    chip.querySelector('.chip-header').onclick = () => {
+      const pre = chip.querySelector('.chip-code');
+      const toggle = chip.querySelector('.chip-toggle');
+      pre.classList.toggle('open');
+      toggle.textContent = pre.classList.contains('open') ? '▲ hide code' : '▼ show code';
+    };
+    return chip;
+  }
+
+  async function sendQuery() {
+    const input = document.getElementById('question-input');
+    const question = input.value.trim();
+    const scope = document.getElementById('scope-select').value;
+    const btn = document.getElementById('send-btn');
+
+    if (!question) return;
+
+    input.value = '';
+    btn.disabled = true;
+    addMessage('user', question);
+    const thinkingMsg = addThinking();
+
+    try {
+      const res = await fetch('/stream', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ question, repo: scope, history: chatHistory })
+      });
+
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let answerBubble = null;
+      let answerText = '';
+      let sources = [];
+      let currentMsg = null;
+
+      thinkingMsg.remove();
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        const lines = decoder.decode(value).split('\n');
+        for (const line of lines) {
+          if (!line.startsWith('data: ')) continue;
+          const data = line.slice(6);
+          if (data === '[DONE]') break;
+
+          let parsed;
+          try { parsed = JSON.parse(data); } catch { continue; }
+
+          if (parsed.sources) {
+            sources = parsed.sources;
+            const messages = document.getElementById('messages');
+            currentMsg = document.createElement('div');
+            currentMsg.className = 'msg assistant';
+            currentMsg.innerHTML = '<div class="msg-role">coderag</div>';
+            answerBubble = document.createElement('div');
+            answerBubble.className = 'msg-bubble';
+            currentMsg.appendChild(answerBubble);
+            messages.appendChild(currentMsg);
+          }
+
+          if (parsed.chunk && answerBubble) {
+            answerText += parsed.chunk;
+            answerBubble.textContent = answerText;
+            document.getElementById('messages').scrollTop = 999999;
+          }
+        }
+      }
+
+      if (sources.length && currentMsg) {
+        const sourcesDiv = document.createElement('div');
+        sourcesDiv.className = 'sources';
+        sources.forEach(s => sourcesDiv.appendChild(buildSourceChip(s)));
+        currentMsg.appendChild(sourcesDiv);
+      }
+
+      // Save to history for next turn
+      if (answerText) addToHistory(question, answerText);
+
+    } catch(e) {
+      thinkingMsg?.remove();
+      addMessage('assistant', `Error: ${e.message}`);
+    } finally {
+      btn.disabled = false;
+      input.focus();
+    }
+  }
+
+  loadRepos();
+</script>
+</body>
+</html>
