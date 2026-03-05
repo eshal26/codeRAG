@@ -1,0 +1,14 @@
+services:
+  - type: web
+    name: coderag
+    runtime: docker
+    plan: free
+    envVars:
+      - key: GROQ_API_KEY
+        sync: false
+      - key: DATABASE_URL
+        sync: false
+    disk:
+      name: indexes
+      mountPath: /app/indexes
+      sizeGB: 1

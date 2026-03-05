@@ -3,4 +3,6 @@ venv/
 indexes/
 __pycache__/
 *.pyc
-.pytest_cache/
+*.index
+*_meta.json
+*_hashes.json

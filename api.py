@@ -1,16 +1,34 @@
+from dotenv import load_dotenv
+load_dotenv()
+
 import os
 import json
-from fastapi import FastAPI, HTTPException
+import uuid
+from contextlib import asynccontextmanager
+from fastapi import FastAPI, HTTPException, BackgroundTasks, Request
 from fastapi.responses import HTMLResponse, StreamingResponse
 from pydantic import BaseModel
+from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi.util import get_remote_address
+from slowapi.errors import RateLimitExceeded
 import uvicorn
 
 from ingestion.ingest import ingest_repo
 from retriever.vector_store import search_repo, search_all_repos, list_indexed_repos
-from generator.answer import generate_answer, stream_answer
+from generator.answer import stream_answer
 from embeddings.embedder import model as embedding_model
+from database.db import init_db, get_all_repos, save_query
 
-app = FastAPI()
+limiter = Limiter(key_func=get_remote_address)
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    init_db()
+    yield
+
+app = FastAPI(lifespan=lifespan)
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
 
@@ -32,19 +50,39 @@ def root():
     return HTMLResponse(content=html)
 
 
-@app.post("/ingest")
-def ingest(req: IngestRequest):
+def run_ingest(job_id: str, github_url: str):
+    """Background task — runs ingestion and updates job status."""
     try:
-        repo_name = ingest_repo(req.github_url)
+        jobs[job_id] = {"status": "downloading", "message": "Downloading repo..."}
+        repo_name = ingest_repo(github_url)
         if not repo_name:
-            raise HTTPException(status_code=400, detail="No Python functions found.")
-        return {"status": "success", "repo": repo_name}
+            jobs[job_id] = {"status": "error", "message": "No functions found."}
+        else:
+            jobs[job_id] = {"status": "done", "message": f"'{repo_name}' indexed successfully.", "repo": repo_name}
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        jobs[job_id] = {"status": "error", "message": str(e)}
+
+
+@app.post("/ingest")
+@limiter.limit("5/minute")
+def ingest(req: IngestRequest, request: Request, background_tasks: BackgroundTasks):
+    job_id = str(uuid.uuid4())
+    jobs[job_id] = {"status": "queued", "message": "Starting..."}
+    background_tasks.add_task(run_ingest, job_id, req.github_url)
+    return {"job_id": job_id, "status": "queued"}
+
+
+@app.get("/status/{job_id}")
+def status(job_id: str):
+    job = jobs.get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found.")
+    return job
 
 
 @app.post("/stream")
-def stream(req: QueryRequest):
+@limiter.limit("20/minute")
+def stream(req: QueryRequest, request: Request):
     query_embedding = embedding_model.encode(req.question)
 
     if req.repo == "all":
@@ -70,29 +108,31 @@ def stream(req: QueryRequest):
             "code": f.get("code", "")
         })
 
+    full_answer = []
+
     def event_stream():
         yield f"data: {json.dumps({'sources': sources})}\n\n"
         for chunk in stream_answer(req.question, retrieved_texts, repo_name=req.repo, history=req.history):
+            full_answer.append(chunk)
             yield f"data: {json.dumps({'chunk': chunk})}\n\n"
+        save_query(req.question, "".join(full_answer), req.repo)
         yield "data: [DONE]\n\n"
 
     return StreamingResponse(event_stream(), media_type="text/event-stream")
 
 
 @app.post("/reindex")
-def reindex(req: IngestRequest):
-    try:
-        repo_name = ingest_repo(req.github_url, force=False)
-        if not repo_name:
-            raise HTTPException(status_code=400, detail="No functions found.")
-        return {"status": "success", "repo": repo_name}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+@limiter.limit("5/minute")
+def reindex(req: IngestRequest, request: Request, background_tasks: BackgroundTasks):
+    job_id = str(uuid.uuid4())
+    jobs[job_id] = {"status": "queued", "message": "Starting re-index..."}
+    background_tasks.add_task(run_ingest, job_id, req.github_url)
+    return {"job_id": job_id, "status": "queued"}
 
 
 @app.get("/repos")
 def repos():
-    return {"repos": list_indexed_repos()}
+    return {"repos": get_all_repos()}
 
 
 if __name__ == "__main__":

@@ -1,5 +1,4 @@
 import io
-import json
 import hashlib
 import os
 import requests
@@ -8,6 +7,7 @@ from parser.ast_parser import extract_functions_from_zip
 from parser.js_parser import extract_js_from_zip
 from embeddings.embedder import embed_functions
 from retriever.vector_store import build_index, save_index, list_indexed_repos, INDEX_DIR
+from database.db import get_hashes, save_hashes, upsert_repo, repo_exists
 
 
 def parse_github_url(github_url):
@@ -36,26 +36,12 @@ def _hash_file(content: bytes) -> str:
     return hashlib.md5(content).hexdigest()
 
 
-def _load_hashes(repo_name) -> dict:
-    path = os.path.join(INDEX_DIR, f"{repo_name}_hashes.json")
-    if os.path.exists(path):
-        with open(path) as f:
-            return json.load(f)
-    return {}
-
-
-def _save_hashes(repo_name, hashes: dict):
-    os.makedirs(INDEX_DIR, exist_ok=True)
-    with open(os.path.join(INDEX_DIR, f"{repo_name}_hashes.json"), "w") as f:
-        json.dump(hashes, f)
-
-
 def ingest_repo(github_url, force=False):
     import zipfile
     import numpy as np
 
     repo_name = github_url.rstrip("/").split("/")[-1]
-    is_update = repo_name in list_indexed_repos()
+    is_update = repo_exists(repo_name)
 
     if is_update and not force:
         print(f"'{repo_name}' already indexed. Checking for changes...")
@@ -64,7 +50,7 @@ def ingest_repo(github_url, force=False):
 
     zip_bytes, repo_name = download_zip(github_url)
 
-    old_hashes = _load_hashes(repo_name) if is_update else {}
+    old_hashes = get_hashes(repo_name) if is_update else {}
     new_hashes = {}
     changed_files = []
     unchanged_files = []
@@ -193,7 +179,8 @@ def ingest_repo(github_url, force=False):
     }
 
     save_index(repo_name, index, meta)
-    _save_hashes(repo_name, new_hashes)
+    save_hashes(repo_name, new_hashes)
+    upsert_repo(repo_name, github_url, len(all_functions))
 
     action = "updated" if is_update else "indexed"
     print(f"Done. '{repo_name}' {action} with {len(all_functions)} total chunks.")
