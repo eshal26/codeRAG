@@ -2,12 +2,8 @@ import os
 import json
 import faiss
 import numpy as np
-from sentence_transformers import CrossEncoder
 
 INDEX_DIR = "indexes"
-
-# Re-ranker model - loads once at import time
-reranker = CrossEncoder("cross-encoder/ms-marco-MiniLM-L-6-v2")
 
 
 def save_index(repo_name, index, meta):
@@ -34,22 +30,9 @@ def load_index(repo_name):
 def build_index(embeddings):
     embeddings_array = np.array(embeddings).astype("float32")
     faiss.normalize_L2(embeddings_array)
-
     index = faiss.IndexFlatIP(embeddings_array.shape[1])
     index.add(embeddings_array)
     return index
-
-
-def rerank(query, results, top_k=3):
-    """Re-rank results using a cross-encoder for better relevance."""
-    pairs = [(query, r["text"]) for r in results]
-    scores = reranker.predict(pairs)
-
-    for i, result in enumerate(results):
-        result["rerank_score"] = float(scores[i])
-
-    results.sort(key=lambda x: x["rerank_score"], reverse=True)
-    return results[:top_k]
 
 
 def search_repo(query_embedding, repo_name, k=3, query=None):
@@ -58,8 +41,7 @@ def search_repo(query_embedding, repo_name, k=3, query=None):
     query_arr = np.array([query_embedding]).astype("float32")
     faiss.normalize_L2(query_arr)
 
-    fetch_k = k * 4 if query else k
-    distances, indices = index.search(query_arr, fetch_k)
+    distances, indices = index.search(query_arr, k)
 
     results = []
     for i, idx in enumerate(indices[0]):
@@ -69,9 +51,6 @@ def search_repo(query_embedding, repo_name, k=3, query=None):
             "repo": repo_name,
             "score": float(distances[0][i])
         })
-
-    if query:
-        results = rerank(query, results, top_k=k)
 
     return results
 
@@ -84,18 +63,13 @@ def search_all_repos(query_embedding, k=3, query=None):
             continue
         repo_name = file.replace(".index", "")
         try:
-            results = search_repo(query_embedding, repo_name, k=k * 2, query=None)
+            results = search_repo(query_embedding, repo_name, k=k * 2)
             all_results.extend(results)
         except Exception as e:
             print(f"Error searching '{repo_name}': {e}")
 
-    if query:
-        all_results = rerank(query, all_results, top_k=k)
-    else:
-        all_results.sort(key=lambda x: x["score"], reverse=True)
-        all_results = all_results[:k]
-
-    return all_results
+    all_results.sort(key=lambda x: x["score"], reverse=True)
+    return all_results[:k]
 
 
 def list_indexed_repos():

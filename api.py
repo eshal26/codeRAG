@@ -31,6 +31,9 @@ app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
+# In-memory job tracker
+jobs = {}
+
 
 class IngestRequest(BaseModel):
     github_url: str
