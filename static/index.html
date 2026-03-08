@@ -384,6 +384,9 @@
     });
   }
 
+  // Auto-refresh repos every 10 seconds
+  setInterval(loadRepos, 10000);
+
   async function ingestRepo() {
     const url = document.getElementById('github-url').value.trim();
     const status = document.getElementById('ingest-status');

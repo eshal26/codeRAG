@@ -1,23 +1,45 @@
 import io
 import hashlib
 import os
+import re
 import requests
 
 from parser.ast_parser import extract_functions_from_zip
-from parser.js_parser import extract_js_from_zip
-from embeddings.embedder import embed_functions
-from retriever.vector_store import build_index, save_index, list_indexed_repos, INDEX_DIR
+from embeddings.embedder import embed_batch, create_embedding_text
+from retriever.vector_store import upsert_vectors, list_indexed_repos, ensure_collection
 from database.db import get_hashes, save_hashes, upsert_repo, repo_exists
 
 
 def parse_github_url(github_url):
+    """Parse GitHub URL to extract owner and repo name.
+    
+    Args:
+        github_url: URL like https://github.com/owner/repo
+        
+    Returns:
+        Tuple of (owner, repo_name)
+        
+    Raises:
+        ValueError: If URL is not a valid GitHub URL
+    """
+    # Validate it's a GitHub URL
+    if not re.match(r'https?://(www\.)?github\.com/[^/]+/[^/]+/?$', github_url):
+        raise ValueError(f"Invalid GitHub URL: {github_url}. Expected format: https://github.com/owner/repo")
+    
     parts = github_url.rstrip("/").split("/")
+    if len(parts) < 2:
+        raise ValueError(f"Invalid GitHub URL format: {github_url}")
+    
     return parts[-2], parts[-1]
 
 
 def get_default_branch(owner, repo):
     api_url = f"https://api.github.com/repos/{owner}/{repo}"
-    response = requests.get(api_url)
+    headers = {}
+    token = os.getenv("GITHUB_TOKEN")
+    if token:
+        headers["Authorization"] = f"token {token}"
+    response = requests.get(api_url, headers=headers)
     response.raise_for_status()
     return response.json().get("default_branch", "main")
 
@@ -38,10 +60,26 @@ def _hash_file(content: bytes) -> str:
 
 def ingest_repo(github_url, force=False):
     import zipfile
-    import numpy as np
 
     repo_name = github_url.rstrip("/").split("/")[-1]
-    is_update = repo_exists(repo_name)
+
+    try:
+        is_update = repo_exists(repo_name)
+    except Exception as e:
+        print(f"DB check failed, falling back to file check: {e}")
+        is_update = repo_name in list_indexed_repos()
+
+    # Verify Qdrant collection actually exists — if not, force full re-index
+    if is_update:
+        try:
+            from retriever.vector_store import get_client
+            client = get_client()
+            collections = [c.name for c in client.get_collections().collections]
+            if repo_name not in collections:
+                print(f"Qdrant collection missing for '{repo_name}', forcing full re-index.")
+                is_update = False
+        except Exception as e:
+            print(f"Qdrant check failed: {e}")
 
     if is_update and not force:
         print(f"'{repo_name}' already indexed. Checking for changes...")
@@ -50,13 +88,16 @@ def ingest_repo(github_url, force=False):
 
     zip_bytes, repo_name = download_zip(github_url)
 
-    old_hashes = get_hashes(repo_name) if is_update else {}
+    try:
+        old_hashes = get_hashes(repo_name) if is_update else {}
+    except Exception:
+        old_hashes = {}
+
     new_hashes = {}
     changed_files = []
     unchanged_files = []
 
     with zipfile.ZipFile(zip_bytes) as zf:
-        # Identify changed files
         for zip_path in zf.namelist():
             if not (zip_path.endswith(".py") or zip_path.endswith(".js")):
                 continue
@@ -75,8 +116,7 @@ def ingest_repo(github_url, force=False):
 
         if is_update:
             print(f"Changed files: {len(changed_files)} | Unchanged: {len(unchanged_files)}")
-        
-        # Parse only changed files
+
         new_chunks = []
         for zip_path in changed_files:
             with zf.open(zip_path) as f:
@@ -96,92 +136,65 @@ def ingest_repo(github_url, force=False):
         print("No functions found.")
         return None
 
-    print(f"Embedding {len(new_chunks)} chunks from changed files...")
-    new_embeddings, new_texts = embed_functions(new_chunks)
-
-    # If updating, load old index and merge keeping unchanged file chunks
-    if is_update:
-        from retriever.vector_store import load_index
-        import faiss
-
-        old_index, old_meta = load_index(repo_name)
-
-        # Keep chunks from unchanged files
-        kept_chunks = [
-            (old_meta["texts"][i], old_meta["functions"][i])
-            for i in range(len(old_meta["functions"]))
-            if old_meta["functions"][i]["file_path"] not in changed_files
-        ]
-
-        kept_texts = [c[0] for c in kept_chunks]
-        kept_functions = [c[1] for c in kept_chunks]
-
-        # Reconstruct old embeddings for kept chunks
-        old_vectors = faiss.rev_swig_ptr(old_index.get_xb(), old_index.ntotal * old_index.d)
-        old_vectors = old_vectors.reshape(old_index.ntotal, old_index.d)
-        kept_indices = [
-            i for i in range(len(old_meta["functions"]))
-            if old_meta["functions"][i]["file_path"] not in changed_files
-        ]
-        kept_vectors = old_vectors[kept_indices]
-
-        # Embed new chunks and normalize
-        new_emb_array = np.array(new_embeddings).astype("float32")
-        faiss.normalize_L2(new_emb_array)
-
-        # Merge
-        all_vectors = np.vstack([kept_vectors, new_emb_array])
-        all_texts = kept_texts + new_texts
-        all_functions = kept_functions + [
-            {
-                "function_name": c["function_name"],
-                "class_name": c["class_name"],
-                "file_path": c["file_path"],
-                "start_line": c["start_line"],
-                "end_line": c["end_line"],
-                "docstring": c["docstring"],
-                "code": c.get("code", ""),
-            }
-            for c in new_chunks
-        ]
+    MAX_CHUNKS = 800
+    if len(new_chunks) > MAX_CHUNKS:
+        print(f"Capping chunks from {len(new_chunks)} to {MAX_CHUNKS}")
+        new_chunks = new_chunks[:MAX_CHUNKS]
+        capped = True
     else:
-        # Full index build
-        import numpy as np
-        import faiss as faiss_mod
+        capped = False
 
-        all_vectors = np.array(new_embeddings).astype("float32")
-        faiss_mod.normalize_L2(all_vectors)
-        all_texts = new_texts
-        all_functions = [
+    print(f"Embedding and uploading {len(new_chunks)} chunks...")
+    
+    # Delete old collection if full re-index (not an update)
+    if not is_update:
+        try:
+            from retriever.vector_store import delete_collection
+            from database.db import delete_repo_metadata
+            delete_collection(repo_name)
+            delete_repo_metadata(repo_name)  # Clean up PostgreSQL metadata too
+        except Exception:
+            pass  # Collection may not exist on first index
+    
+    ensure_collection(repo_name)
+
+    # Embed and upload in batches — keeps RAM low
+    BATCH_SIZE = 32
+    all_functions = []
+    all_texts = []
+    id_counter = 0  # Global ID counter to avoid collisions
+
+    for i in range(0, len(new_chunks), BATCH_SIZE):
+        batch = new_chunks[i:i + BATCH_SIZE]
+        texts = [create_embedding_text(c) for c in batch]
+        embeddings = embed_batch(texts)
+
+        functions = [
             {
                 "function_name": c["function_name"],
-                "class_name": c["class_name"],
+                "class_name": c.get("class_name", ""),
                 "file_path": c["file_path"],
                 "start_line": c["start_line"],
                 "end_line": c["end_line"],
-                "docstring": c["docstring"],
+                "docstring": c.get("docstring", ""),
                 "code": c.get("code", ""),
             }
-            for c in new_chunks
+            for c in batch
         ]
 
-    import faiss
-    dim = all_vectors.shape[1]
-    index = faiss.IndexFlatIP(dim)
-    index.add(all_vectors)
+        upsert_vectors(repo_name, embeddings, texts, functions, id_offset=id_counter)
+        id_counter += len(batch)
+        all_functions.extend(functions)
+        all_texts.extend(texts)
+        print(f"Processed {min(i + BATCH_SIZE, len(new_chunks))}/{len(new_chunks)} chunks")
 
-    meta = {
-        "repo_name": repo_name,
-        "github_url": github_url,
-        "total_functions": len(all_functions),
-        "texts": all_texts,
-        "functions": all_functions
-    }
-
-    save_index(repo_name, index, meta)
-    save_hashes(repo_name, new_hashes)
-    upsert_repo(repo_name, github_url, len(all_functions))
+    try:
+        save_hashes(repo_name, new_hashes)
+        upsert_repo(repo_name, github_url, len(all_functions))
+    except Exception as e:
+        print(f"DB save failed (non-fatal): {e}")
 
     action = "updated" if is_update else "indexed"
-    print(f"Done. '{repo_name}' {action} with {len(all_functions)} total chunks.")
+    cap_msg = " (capped at 800 chunks)" if capped else ""
+    print(f"Index complete. '{repo_name}' {action} with {len(all_functions)} total chunks{cap_msg}.")
     return repo_name

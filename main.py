@@ -1,7 +1,7 @@
 from ingestion.ingest import ingest_repo
 from retriever.vector_store import search_repo, search_all_repos, list_indexed_repos
 from generator.answer import generate_answer
-from embeddings.embedder import model
+from embeddings.embedder import get_model
 
 
 def main():
@@ -30,7 +30,7 @@ def main():
             scope = input("Search which repo? (name or 'all'): ").strip()
             query = input("Your question: ").strip()
 
-            query_embedding = model.encode(query)
+            query_embedding = list(get_model().embed([query]))[0]
 
             if scope == "all":
                 results = search_all_repos(query_embedding, k=3)

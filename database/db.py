@@ -84,6 +84,18 @@ def repo_exists(repo_name):
             return cur.fetchone() is not None
 
 
+def delete_repo_metadata(repo_name):
+    """Delete all metadata for a repo (used when deleting from Qdrant)."""
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            # Delete from repos table
+            cur.execute("DELETE FROM repos WHERE repo_name = %s;", (repo_name,))
+            # Delete from file_hashes table
+            cur.execute("DELETE FROM file_hashes WHERE repo_name = %s;", (repo_name,))
+        conn.commit()
+    print(f"Deleted metadata for '{repo_name}' from PostgreSQL")
+
+
 # --- File hashes ---
 
 def get_hashes(repo_name) -> dict:

@@ -8,6 +8,10 @@ services:
         sync: false
       - key: DATABASE_URL
         sync: false
+      - key: QDRANT_URL
+        sync: false
+      - key: QDRANT_API_KEY
+        sync: false
     disk:
       name: indexes
       mountPath: /app/indexes

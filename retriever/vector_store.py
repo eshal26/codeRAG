@@ -1,67 +1,114 @@
 import os
-import json
-import faiss
+import time
 import numpy as np
+from qdrant_client import QdrantClient
+from qdrant_client.models import (
+    VectorParams, Distance, PointStruct
+)
 
+QDRANT_URL = os.getenv("QDRANT_URL")
+QDRANT_API_KEY = os.getenv("QDRANT_API_KEY")
+VECTOR_DIM = 384
 INDEX_DIR = "indexes"
+MAX_CHUNKS = 500  # middle ground for large repos
 
 
-def save_index(repo_name, index, meta):
-    os.makedirs(INDEX_DIR, exist_ok=True)
-    faiss.write_index(index, os.path.join(INDEX_DIR, f"{repo_name}.index"))
-    with open(os.path.join(INDEX_DIR, f"{repo_name}_meta.json"), "w") as f:
-        json.dump(meta, f, indent=2)
+def get_client():
+    if not QDRANT_URL or not QDRANT_API_KEY:
+        raise RuntimeError("QDRANT_URL and QDRANT_API_KEY must be set in environment variables")
+    return QdrantClient(url=QDRANT_URL, api_key=QDRANT_API_KEY, timeout=60)
 
 
-def load_index(repo_name):
-    index_path = os.path.join(INDEX_DIR, f"{repo_name}.index")
-    meta_path = os.path.join(INDEX_DIR, f"{repo_name}_meta.json")
+def ensure_collection(repo_name):
+    """Create collection if it doesn't exist."""
+    client = get_client()
+    collections = [c.name for c in client.get_collections().collections]
+    if repo_name not in collections:
+        try:
+            client.create_collection(
+                collection_name=repo_name,
+                vectors_config=VectorParams(size=VECTOR_DIM, distance=Distance.COSINE)
+            )
+            print(f"Created Qdrant collection: {repo_name}")
+        except Exception as e:
+            print(f"Warning: Failed to create collection: {e}")
+            raise
 
-    if not os.path.exists(index_path):
-        raise FileNotFoundError(f"No index found for repo: '{repo_name}'. Ingest it first.")
 
-    index = faiss.read_index(index_path)
-    with open(meta_path, "r") as f:
-        meta = json.load(f)
+def delete_collection(repo_name):
+    """Delete all vectors for a repo (used on full re-index)."""
+    client = get_client()
+    collections = [c.name for c in client.get_collections().collections]
+    if repo_name in collections:
+        try:
+            client.delete_collection(collection_name=repo_name)
+            print(f"Deleted Qdrant collection: {repo_name}")
+        except Exception as e:
+            print(f"Warning: Failed to delete collection: {e}")
+            raise
 
-    return index, meta
 
+def upsert_vectors(repo_name, embeddings, texts, functions, id_offset=0):
+    """Upsert vectors to Qdrant with retry logic.
+    
+    Args:
+        repo_name: Collection name
+        embeddings: List of embedding vectors (numpy arrays)
+        texts: List of text chunks
+        functions: List of function metadata dicts
+        id_offset: Starting ID for this batch (ensures globally unique IDs)
+    """
+    client = get_client()
 
-def build_index(embeddings):
-    embeddings_array = np.array(embeddings).astype("float32")
-    faiss.normalize_L2(embeddings_array)
-    index = faiss.IndexFlatIP(embeddings_array.shape[1])
-    index.add(embeddings_array)
-    return index
+    points = []
+    for i, (emb, text, func) in enumerate(zip(embeddings, texts, functions)):
+        point_id = id_offset + i
+        points.append(PointStruct(
+            id=point_id,
+            vector=emb.tolist(),
+            payload={"text": text, "function": func, "repo": repo_name}
+        ))
+
+    # Upload in batches of 32 with retry
+    batch_size = 32
+    for i in range(0, len(points), batch_size):
+        batch = points[i:i + batch_size]
+        for attempt in range(3):
+            try:
+                client.upsert(collection_name=repo_name, points=batch)
+                break
+            except Exception as e:
+                if attempt == 2:
+                    print(f"Failed to upsert batch after 3 attempts: {e}")
+                    raise
+                print(f"Upsert retry {attempt + 1}/2 after error: {e}")
+                time.sleep(2)
 
 
 def search_repo(query_embedding, repo_name, k=3, query=None):
-    index, meta = load_index(repo_name)
-
-    query_arr = np.array([query_embedding]).astype("float32")
-    faiss.normalize_L2(query_arr)
-
-    distances, indices = index.search(query_arr, k)
-
-    results = []
-    for i, idx in enumerate(indices[0]):
-        results.append({
-            "text": meta["texts"][idx],
-            "function": meta["functions"][idx],
+    client = get_client()
+    results = client.search(
+        collection_name=repo_name,
+        query_vector=query_embedding.tolist(),
+        limit=k
+    )
+    return [
+        {
+            "text": r.payload["text"],
+            "function": r.payload["function"],
             "repo": repo_name,
-            "score": float(distances[0][i])
-        })
-
-    return results
+            "score": r.score
+        }
+        for r in results
+    ]
 
 
 def search_all_repos(query_embedding, k=3, query=None):
-    all_results = []
+    client = get_client()
+    collections = [c.name for c in client.get_collections().collections]
 
-    for file in os.listdir(INDEX_DIR):
-        if not file.endswith(".index"):
-            continue
-        repo_name = file.replace(".index", "")
+    all_results = []
+    for repo_name in collections:
         try:
             results = search_repo(query_embedding, repo_name, k=k * 2)
             all_results.extend(results)
@@ -73,6 +120,10 @@ def search_all_repos(query_embedding, k=3, query=None):
 
 
 def list_indexed_repos():
-    if not os.path.exists(INDEX_DIR):
-        return []
-    return [f.replace(".index", "") for f in os.listdir(INDEX_DIR) if f.endswith(".index")]
+    try:
+        client = get_client()
+        return [c.name for c in client.get_collections().collections]
+    except Exception:
+        if not os.path.exists(INDEX_DIR):
+            return []
+        return [f.replace(".index", "") for f in os.listdir(INDEX_DIR) if f.endswith(".index")]

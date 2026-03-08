@@ -4,7 +4,11 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-client = Groq(api_key=os.getenv("GROQ_API_KEY"))
+_api_key = os.getenv("GROQ_API_KEY")
+if not _api_key:
+    raise RuntimeError("GROQ_API_KEY is not set. Check your .env file.")
+
+client = Groq(api_key=_api_key)
 
 SYSTEM_PROMPT = """You are an expert code documentation assistant.
 When explaining code:

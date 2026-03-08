@@ -10,8 +10,6 @@ RUN apt-get update && apt-get install -y \
 
 COPY requirements.txt .
 
-# Install heavy packages first (CPU-only torch, avoids GPU bloat)
-RUN pip install --no-cache-dir --timeout=120 torch --index-url https://download.pytorch.org/whl/cpu
 
 # Install rest of dependencies
 RUN pip install --no-cache-dir --timeout=120 -r requirements.txt

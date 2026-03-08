@@ -6,6 +6,7 @@ import json
 import uuid
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException, BackgroundTasks, Request
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, StreamingResponse
 from pydantic import BaseModel
 from slowapi import Limiter, _rate_limit_exceeded_handler
@@ -16,7 +17,7 @@ import uvicorn
 from ingestion.ingest import ingest_repo
 from retriever.vector_store import search_repo, search_all_repos, list_indexed_repos
 from generator.answer import stream_answer
-from embeddings.embedder import model as embedding_model
+from embeddings.embedder import embed_batch, get_model
 from database.db import init_db, get_all_repos, save_query
 
 limiter = Limiter(key_func=get_remote_address)
@@ -27,6 +28,16 @@ async def lifespan(app: FastAPI):
     yield
 
 app = FastAPI(lifespan=lifespan)
+
+# Add CORS middleware to allow frontend requests
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -53,17 +64,25 @@ def root():
     return HTMLResponse(content=html)
 
 
+import traceback
+
 def run_ingest(job_id: str, github_url: str):
     """Background task — runs ingestion and updates job status."""
     try:
+        print(f"[ingest] Starting job {job_id} for {github_url}")
         jobs[job_id] = {"status": "downloading", "message": "Downloading repo..."}
         repo_name = ingest_repo(github_url)
         if not repo_name:
             jobs[job_id] = {"status": "error", "message": "No functions found."}
+            print(f"[ingest] No functions found for {github_url}")
         else:
             jobs[job_id] = {"status": "done", "message": f"'{repo_name}' indexed successfully.", "repo": repo_name}
+            print(f"[ingest] Done: {repo_name}")
     except Exception as e:
-        jobs[job_id] = {"status": "error", "message": str(e)}
+        error_msg = str(e)
+        print(f"[ingest] ERROR: {error_msg}")
+        print(traceback.format_exc())
+        jobs[job_id] = {"status": "error", "message": error_msg}
 
 
 @app.post("/ingest")
@@ -86,12 +105,15 @@ def status(job_id: str):
 @app.post("/stream")
 @limiter.limit("20/minute")
 def stream(req: QueryRequest, request: Request):
-    query_embedding = embedding_model.encode(req.question)
+    query_embedding = list(get_model().embed([req.question]))[0]
 
-    if req.repo == "all":
-        results = search_all_repos(query_embedding, k=3, query=req.question)
-    else:
-        results = search_repo(query_embedding, req.repo, k=3, query=req.question)
+    try:
+        if req.repo == "all":
+            results = search_all_repos(query_embedding, k=3, query=req.question)
+        else:
+            results = search_repo(query_embedding, req.repo, k=3, query=req.question)
+    except Exception as e:
+        raise HTTPException(status_code=404, detail=f"Repo not found or not indexed yet: {str(e)}")
 
     if not results:
         raise HTTPException(status_code=404, detail="No results found.")
@@ -135,7 +157,14 @@ def reindex(req: IngestRequest, request: Request, background_tasks: BackgroundTa
 
 @app.get("/repos")
 def repos():
-    return {"repos": get_all_repos()}
+    """Return only repos that actually exist in Qdrant (source of truth)."""
+    try:
+        # Qdrant is the source of truth — only return repos with actual vectors
+        indexed_repos = list_indexed_repos()
+        return {"repos": indexed_repos}
+    except Exception as e:
+        print(f"Error fetching repos from Qdrant: {e}")
+        return {"repos": []}
 
 
 if __name__ == "__main__":

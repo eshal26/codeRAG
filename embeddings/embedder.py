@@ -1,6 +1,13 @@
-from sentence_transformers import SentenceTransformer
+from fastembed import TextEmbedding
+import numpy as np
 
-model = SentenceTransformer("all-MiniLM-L6-v2")
+_model = None
+
+def get_model():
+    global _model
+    if _model is None:
+        _model = TextEmbedding(model_name="BAAI/bge-small-en-v1.5")
+    return _model
 
 
 def create_embedding_text(func):
@@ -12,7 +19,12 @@ Code:
 {func['code']}"""
 
 
+def embed_batch(texts):
+    """Embed a list of texts, return numpy array."""
+    embeddings = list(get_model().embed(texts))
+    return np.array(embeddings)
+
+
 def embed_functions(functions):
     texts = [create_embedding_text(f) for f in functions]
-    embeddings = model.encode(texts, show_progress_bar=True)
-    return embeddings, texts
+    return embed_batch(texts), texts
